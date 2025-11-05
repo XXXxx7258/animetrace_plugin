@@ -16,9 +16,7 @@ def main() -> None:
         "https://api.animetrace.com/v1/search", json=payload, timeout=60
     )
     print("status:", response.status_code)
-    (base_dir / "animetrace_response.json").write_text(
-        response.text, encoding="utf-8"
-    )
+    (base_dir / "animetrace_response.json").write_text(response.text, encoding="utf-8")
     print("response saved to animetrace_response.json")
 
 

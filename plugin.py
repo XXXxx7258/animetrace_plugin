@@ -200,13 +200,33 @@ class AnimeTraceOnMessage(BaseEventHandler):
                         )
                     except Exception:
                         pass
-                    resp = await client.search(
-                        base64_data=raw_part,
-                        model=model,
-                        is_multi=is_multi,
-                        ai_detect=ai_detect,
-                    )
-                    self._logger.info("Trace via base64")
+                    try:
+                        resp = await client.search(
+                            base64_data=raw_part,
+                            model=model,
+                            is_multi=is_multi,
+                            ai_detect=ai_detect,
+                        )
+                        self._logger.info("Trace via base64")
+                    except AnimeTraceError as e_base64:
+                        # 若 base64 路径 4xx，则回退为文件上传（更贴合部分后端实现）
+                        # 注意：仅在 httpx 可用时 file_bytes 才生效；client 内部会抛错提示
+                        try:
+                            import base64 as _b64
+
+                            file_bytes = _b64.b64decode(raw_part)
+                            self._logger.info(
+                                f"Fallback to file upload (#{idx}) bytes={len(file_bytes)}"
+                            )
+                            resp = await client.search(
+                                file_bytes=file_bytes,
+                                model=model,
+                                is_multi=is_multi,
+                                ai_detect=ai_detect,
+                            )
+                            self._logger.info("Trace via file (fallback from base64)")
+                        except Exception:
+                            raise e_base64
 
                 # 响应结构简要日志
                 try:
