@@ -313,10 +313,10 @@ class AnimeTracePlugin(BasePlugin):
             ),
             "ai_detect": ConfigField(type=int, default=1, description="AI图检测(1/0)"),
             "request_timeout": ConfigField(
-                type=float, default=15.0, description="请求超时(秒)"
+                type=float, default=20.0, description="请求超时(秒)"
             ),
             "auto_on_image": ConfigField(
-                type=bool, default=True, description="收到图片自动识别"
+                type=bool, default=False, description="收到图片自动识别"
             ),
             "trigger_keywords": ConfigField(
                 type=list,
