@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 from src.plugin_system import (
     BaseEventHandler,
@@ -11,6 +11,7 @@ from src.plugin_system import (
     EventType,
     MaiMessages,
     PythonDependency,
+    get_logger,
     register_plugin,
 )
 
@@ -29,6 +30,7 @@ class AnimeTraceOnMessage(BaseEventHandler):
     handler_description = "接收图片并调用 AnimeTrace 返回识别结果"
     weight = 10
     intercept_message = False
+    _logger = get_logger("animetrace_plugin")
 
     async def execute(
         self, message: MaiMessages | None
@@ -51,6 +53,9 @@ class AnimeTraceOnMessage(BaseEventHandler):
         min_similarity: float = float(
             self.get_config("anime_trace.min_similarity", 0.0) or 0.0
         )
+        input_preference: str = str(
+            self.get_config("anime_trace.input_preference", "prefer_base64")
+        )
 
         text = (message.plain_text or "").strip()
 
@@ -67,21 +72,60 @@ class AnimeTraceOnMessage(BaseEventHandler):
         if not should_trigger:
             return True, True, None, None, None
 
-        # 提取图片段（含 image/emoji 两种可能承载 base64 图像数据的段）
+        # 提取图片段（支持 image/emoji 以及 Napcat data.file、嵌套 seglist/forward/reply 的通用解析）
+        def _collect_images_from_any(obj: Any, out: List[str]) -> None:
+            if obj is None:
+                return
+            # Seg 对象
+            if hasattr(obj, "type") and hasattr(obj, "data"):
+                s_type = getattr(obj, "type", "")
+                s_data = getattr(obj, "data", None)
+                if s_type in ("image", "emoji") and isinstance(s_data, str):
+                    out.append(s_data)
+                    return
+                # 递归处理列表/字典形态
+                _collect_images_from_any(s_data, out)
+                return
+            # list 容器
+            if isinstance(obj, list):
+                for item in obj:
+                    _collect_images_from_any(item, out)
+                return
+            # dict 容器（Napcat 风格）
+            if isinstance(obj, dict):
+                # 常见字段：file/url/base64、message(嵌套消息列表)、content、data
+                file_val = obj.get("file")
+                if isinstance(file_val, str):
+                    out.append(file_val)
+                for k in ("message", "content", "data"):
+                    if k in obj:
+                        _collect_images_from_any(obj[k], out)
+                return
+
         images: List[str] = []
-        for seg in message.message_segments or []:
-            seg_type = getattr(seg, "type", "")
-            seg_data = getattr(seg, "data", None)
-            if seg_type in ("image", "emoji") and isinstance(seg_data, str):
-                images.append(seg_data)
-                if len(images) >= max_images:
-                    break
+        _collect_images_from_any(message.message_segments or [], images)
+        # 去重并截断
+        seen: set[str] = set()
+        uniq_images: List[str] = []
+        for v in images:
+            if v not in seen:
+                seen.add(v)
+                uniq_images.append(v)
+            if len(uniq_images) >= max_images:
+                break
+        images = uniq_images
 
         if not images:
             return True, True, None, None, None
 
-        # 回执提示
+        # 回执提示与日志
         await self.send_text(stream_id, "正在识别图片(AnimeTrace)…")
+        try:
+            self._logger.info(
+                f"Start trace: count={len(images)} pref={input_preference} model={self.get_config('anime_trace.model', 'animetrace_high_beta')}"
+            )
+        except Exception:
+            pass
 
         # 客户端配置
         endpoint: str = str(
@@ -101,15 +145,48 @@ class AnimeTraceOnMessage(BaseEventHandler):
         lines: List[str] = []
         for idx, img in enumerate(images, start=1):
             try:
-                # 判断是否是 URL 或 base64
+                # 判断是否是 URL 或 base64，根据 input_preference 统一路径
                 if img.startswith("http://") or img.startswith("https://"):
-                    resp = await client.search(
-                        url=img, model=model, is_multi=is_multi, ai_detect=ai_detect
-                    )
-                else:
-                    # 粗略校验是否为base64
                     try:
-                        base64.b64decode(img.split(",")[-1], validate=True)
+                        self._logger.info(f"Image #{idx} url={img}")
+                    except Exception:
+                        pass
+                    if input_preference == "prefer_base64":
+                        # 尝试将 URL 下载并转 Base64，再以 base64 字段上传
+                        try:
+                            b64 = await client.url_to_base64(img)
+                            try:
+                                self._logger.info(
+                                    f"Image #{idx} url-to-base64 len={len(b64)} head={b64[:24]}"
+                                )
+                            except Exception:
+                                pass
+                            resp = await client.search(
+                                base64_data=b64,
+                                model=model,
+                                is_multi=is_multi,
+                                ai_detect=ai_detect,
+                            )
+                            self._logger.info("Trace via base64 (from url)")
+                        except Exception:
+                            # 降级：直接用 URL 请求
+                            resp = await client.search(
+                                url=img,
+                                model=model,
+                                is_multi=is_multi,
+                                ai_detect=ai_detect,
+                            )
+                            self._logger.info("Trace via url (fallback)")
+                    else:
+                        resp = await client.search(
+                            url=img, model=model, is_multi=is_multi, ai_detect=ai_detect
+                        )
+                        self._logger.info("Trace via url")
+                else:
+                    # 粗略校验是否为base64，并规范为纯b64（去掉 data:* 前缀）
+                    raw_part = img.split(",")[-1]
+                    try:
+                        base64.b64decode(raw_part, validate=True)
                         is_b64 = True
                     except Exception:
                         is_b64 = False
@@ -117,12 +194,40 @@ class AnimeTraceOnMessage(BaseEventHandler):
                     if not is_b64:
                         # 无法识别的内容，跳过
                         continue
+                    try:
+                        self._logger.info(
+                            f"Image #{idx} base64 len={len(raw_part)} head={raw_part[:24]}"
+                        )
+                    except Exception:
+                        pass
                     resp = await client.search(
-                        base64_data=img,
+                        base64_data=raw_part,
                         model=model,
                         is_multi=is_multi,
                         ai_detect=ai_detect,
                     )
+                    self._logger.info("Trace via base64")
+
+                # 响应结构简要日志
+                try:
+                    d = resp.get("data") if isinstance(resp, dict) else None
+                    d_type = (
+                        "list"
+                        if isinstance(d, list)
+                        else "dict"
+                        if isinstance(d, dict)
+                        else "none"
+                    )
+                    d_len = (
+                        len(d)
+                        if isinstance(d, list)
+                        else (len(d.keys()) if isinstance(d, dict) else 0)
+                    )
+                    self._logger.info(
+                        f"Resp keys={list(resp.keys())[:6] if isinstance(resp, dict) else 'n/a'} data_type={d_type} data_len={d_len}"
+                    )
+                except Exception:
+                    pass
 
                 # 将响应转换为简明文本
                 text_line = AnimeTraceClient.format_response_text(
@@ -203,6 +308,11 @@ class AnimeTracePlugin(BasePlugin):
             ),
             "min_similarity": ConfigField(
                 type=float, default=0.0, description="最小相似度阈值(0-100或0-1)"
+            ),
+            "input_preference": ConfigField(
+                type=str,
+                default="prefer_base64",
+                description="输入优先级: auto/prefer_url/prefer_base64",
             ),
         },
     }

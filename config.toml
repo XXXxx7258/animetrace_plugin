@@ -15,4 +15,4 @@ auto_on_image = true              # 收到图片自动识别
 trigger_keywords = ["/trace", "动漫识别", "以图搜番"]
 max_images = 1
 min_similarity = 0.0
-
+input_preference = "prefer_base64"  # auto|prefer_url|prefer_base64（统一优先级，默认启用为 prefer_base64）

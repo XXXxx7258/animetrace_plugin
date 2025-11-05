@@ -1,0 +1,5 @@
+AnimeTrace API 文档关键信息草稿（测试文件）：
+- 识别接口：POST https://api.animetrace.com/v1/search
+- 可选参数：is_multi（0/1）、model、ai_detect（1/2）、file/url/base64（三选一上传图像）
+- 常见模型：anime_model_lovelive、pre_stable、anime、full_game_model_kira、animetrace_high_beta
+- 常见返回码：17720 成功，17702 服务器繁忙，17704 维护中，17705 格式不支持，17728 达到调用上限
